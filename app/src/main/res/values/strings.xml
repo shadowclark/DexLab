@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DexLab</string>
+    <string name="static_analysis_notice">Hi, static analyst. You are reading the DexLab APK. That is fair: DexLab exists to teach Android reverse engineering. Analyze only apps you own or have permission to test, and report bugs instead of republishing modified builds.</string>
+</resources>

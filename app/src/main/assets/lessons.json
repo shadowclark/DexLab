@@ -1,0 +1,459 @@
+{
+  "modules": [
+    {
+      "id": "foundations",
+      "title": "Foundations",
+      "subtitle": "What an APK is and how Android code is packaged",
+      "lessons": [
+        {
+          "id": "apk-anatomy",
+          "title": "Anatomy of an APK",
+          "minutes": 6,
+          "summary": "An APK is a ZIP archive with a strict contract. Learn the files that matter before you touch a disassembler.",
+          "sections": [
+            {
+              "heading": "A ZIP with rules",
+              "body": "Every APK is a ZIP. If you rename it to .zip you can list it with any archive tool. Android cares about a handful of entries: the binary manifest, one or more DEX files, the resource table, native libraries, assets, and the signature block. Split APKs move some of these into separate files, so a modern app may be a base APK plus configuration and feature splits.\n\nThe ZIP central directory is also evidence. Compression ratios, timestamps, entry order and unusual names often reveal the build toolchain or a repackaging step.",
+              "code": "AndroidManifest.xml      binary XML, not text\nclasses.dex              Dalvik bytecode\nclasses2.dex ...         multidex overflow\nresources.arsc           compiled resource table\nlib/<abi>/*.so           native code\nassets/                  arbitrary bundled files\nMETA-INF/                signing metadata (v1)"
+            },
+            {
+              "heading": "Where the code lives",
+              "body": "Java and Kotlin compile to class files, then D8 or R8 converts them to DEX. A DEX file is a register machine, not a stack machine: instructions name registers such as v0 and p1. The manifest points at the application class and components; the code behind them is in classes.dex and its numbered siblings.\n\nNative code is optional. When present, it lives under lib/ and is loaded with System.loadLibrary. That is the boundary where Java names become ELF symbols.",
+              "code": "Application\n  -> AndroidManifest.xml\n  -> classes.dex\n  -> lib/arm64-v8a/libexample.so\n  -> assets/config.dat"
+            }
+          ],
+          "task": "Analyze DexLab itself. Find the package name, the launcher activity, and one native library in lib/.",
+          "answer": "Open DexLab (self) from Analyze. The package is com.dexlab.app and the launcher activity is com.dexlab.app.MainActivity. lib/ contains libdexlab_capstone.so and libsample.so for each packaged ABI (arm64-v8a, armeabi-v7a, x86_64).",
+          "tryTool": "self"
+        },
+        {
+          "id": "dex-and-smali",
+          "title": "DEX and smali",
+          "minutes": 8,
+          "summary": "Read the header and string table, then turn a class into smali you can actually follow.",
+          "sections": [
+            {
+              "heading": "The DEX header",
+              "body": "A DEX file starts with the magic bytes 64 65 78 0A followed by a version string, a checksum, and a SHA-1 signature. The header then gives the counts and file offsets of the string, type, prototype, field and method tables. The string table is usually the fastest way to get context: class names, method names, URLs, error messages and hardcoded secrets all live there.\n\nDexLab reads the string table directly, without loading the whole file into dexlib2, so string search stays fast even on large apps.",
+              "code": "offset 0x00  magic   dex\\n038\\0\noffset 0x08  checksum (Adler-32)\noffset 0x0C  signature (SHA-1)\noffset 0x20  file_size\noffset 0x38  string_ids_size\noffset 0x3C  string_ids_off"
+            },
+            {
+              "heading": "From class to smali",
+              "body": "Smali is a textual representation of DEX. Each class has a descriptor such as Lcom/dexlab/lab/Login;. Methods declare a register count and a sequence of instructions. The first registers hold parameters: for an instance method, p0 is this. The rest are locals.\n\nbaksmali performs the conversion. DexLab runs it with a class filter, so opening one class does not disassemble the entire app.",
+              "code": ".class public final Lcom/dexlab/lab/Login;\n.super Ljava/lang/Object;\n\n.method public static check(Ljava/lang/String;Ljava/lang/String;)Z\n    .registers 3\n    const-string v0, \"student\"\n    invoke-virtual {v0, p0}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z\n    move-result v0\n    return v0\n.end method"
+            }
+          ],
+          "task": "Open sample.dex and find the Login class. How many methods does it declare, and what is the descriptor of the class?",
+          "answer": "Login has four methods: check, encode, decode and hint. Its descriptor is Lcom/dexlab/lab/Login;. The class browser shows the method and field counts next to each class.",
+          "tryTool": "sample-dex"
+        },
+        {
+          "id": "registers",
+          "title": "Registers and calling conventions",
+          "minutes": 7,
+          "summary": "Why smali says v0 and p1, and how arguments arrive in a method.",
+          "sections": [
+            {
+              "heading": "Parameters are just registers",
+              "body": "DEX methods declare a total register count with .registers, or a local count with .locals. Parameters occupy the highest registers. For a static method with two String arguments and one local, .registers 3 means v0 is the local and p0/p1 are the arguments. For an instance method, p0 is this.\n\nWide values such as long and double occupy two registers. That is why a method with a long parameter can appear to skip a register number.",
+              "code": ".method public static check(Ljava/lang/String;Ljava/lang/String;)Z\n    .registers 3     # v0, p0, p1\n    ...\n.end method\n\n.method public encode(Ljava/lang/String;)Ljava/lang/String;\n    .registers 4     # v0, v1, p0=this, p1=input\n    ...\n.end method"
+            },
+            {
+              "heading": "Following data",
+              "body": "The common pattern const-string v0, \"...\" followed by invoke-virtual is a method call on a constant. move-result captures the return value. if-eqz branches when a value is zero or null. Reading a method means tracking which register holds what, not memorizing every opcode.\n\nWhen a value disappears into a helper, follow the helper. Click Find callers to see who invokes a method, and search the string table for the constants it compares.",
+              "code": "const-string v0, \"student\"\ninvoke-virtual {v0, p0}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z\nmove-result v0\nif-eqz v0, :not_student"
+            }
+          ],
+          "task": "In Login.check, which register holds the hardcoded user name, and what happens when the comparison fails?",
+          "answer": "The constant student is loaded into a local (v0 in the decompiled view) and compared with p0, the first method argument. If equals returns false, if-eqz jumps to the failure path that returns false. The exact register numbers depend on the compiler, so read the .registers line rather than assuming.",
+          "tryTool": "sample-dex"
+        }
+      ]
+    },
+    {
+      "id": "manifest",
+      "title": "Manifest and attack surface",
+      "subtitle": "Read the contract Android enforces before any code runs",
+      "lessons": [
+        {
+          "id": "manifest-basics",
+          "title": "Reading a binary manifest",
+          "minutes": 6,
+          "summary": "AndroidManifest.xml inside an APK is compiled binary XML. Decode the string pool and the start-element chunks.",
+          "sections": [
+            {
+              "heading": "Why it looks like garbage",
+              "body": "The manifest is compiled into a resource chunk format. It begins with a file header (type 0x0003), followed by a string pool, a resource map, and a tree of start-element and end-element chunks. Attribute names are indices into the string pool, and many carry a resource ID such as 0x01010003 for android:name.\n\nDexLab parses these chunks directly. It resolves attribute names through android.R.attr, then prints a readable XML document. No aapt2 is needed on the device.",
+              "code": "file header      03 00 08 00\nstring pool      01 00 ...\nresource map     80 01 ...\nstart element    02 01 ...\n  namespace, name, attributeCount\n  attributes: ns, name, rawValue, typedValue\nend element      03 01 ..."
+            },
+            {
+              "heading": "What to look for",
+              "body": "Start with package, versionName and versionCode. Then uses-sdk: minSdk and targetSdk explain which platform behaviors apply. The application element carries debuggable, allowBackup, usesCleartextTraffic and networkSecurityConfig. Each component can declare exported, permission and intent-filter.\n\nA debuggable release build is a finding. So is an exported component with no permission and a deep link that accepts arbitrary input.",
+              "code": "<application\n    android:debuggable=\"true\"\n    android:allowBackup=\"true\"\n    android:usesCleartextTraffic=\"true\">\n    <activity android:name=\".MainActivity\"\n        android:exported=\"true\">"
+            }
+          ],
+          "task": "Analyze DexLab itself and find its targetSdk, its only permission, and whether allowBackup is enabled.",
+          "answer": "DexLab targets SDK 36, declares QUERY_ALL_PACKAGES (used to list installed apps for analysis), and sets android:allowBackup=false. The app is debuggable in this debug build, which is expected for a sideloaded workbench.",
+          "tryTool": "self"
+        },
+        {
+          "id": "exported-components",
+          "title": "Exported components",
+          "minutes": 7,
+          "summary": "Every exported activity, service, receiver and provider is a door. Learn how Android decides which doors are open.",
+          "sections": [
+            {
+              "heading": "The exported flag",
+              "body": "A component with an intent-filter is reachable by other apps unless android:exported is false. Since Android 12, components with intent filters must declare exported explicitly or the app will not install. Components without intent filters default to false when exported is omitted.\n\nExported is not automatically a vulnerability. It becomes interesting when the component trusts its input: an activity that reads an extra and writes a file, a receiver that accepts a broadcast and changes state, or a provider with path traversal.",
+              "code": "<activity android:name=\".DeepLinkActivity\"\n    android:exported=\"true\">\n    <intent-filter>\n        <action android:name=\"android.intent.action.VIEW\" />\n        <category android:name=\"android.intent.category.DEFAULT\" />\n        <data android:scheme=\"dexlab\" android:host=\"open\" />\n    </intent-filter>\n</activity>"
+            },
+            {
+              "heading": "Providers are special",
+              "body": "A ContentProvider is addressed by authority, not by class name. Check android:authorities, android:exported, android:grantUriPermissions and android:permission. A provider that is exported and has no read/write permission is directly reachable through content:// URIs.\n\nServices and receivers follow the same logic. A bound service with an exported interface can be called by any app that knows the action or component name.",
+              "code": "adb shell am start -n com.example/.DeepLinkActivity -d \"myapp://open?url=...\"\nadb shell content query --uri content://com.example.provider/items"
+            }
+          ],
+          "task": "In a manifest, an activity declares an intent-filter but no android:exported attribute, and targetSdk is 30. Is it reachable by other apps? What changes at targetSdk 31?",
+          "answer": "At targetSdk 30 and below, a component with an intent-filter defaults to exported=true, so it is reachable. At targetSdk 31 and above, the app must declare android:exported explicitly for components with intent filters; otherwise installation fails. An explicit exported=false makes it unreachable.",
+          "tryTool": "self"
+        },
+        {
+          "id": "deep-links",
+          "title": "Deep links and data flow",
+          "minutes": 5,
+          "summary": "Schemes, hosts, paths and the parameters that reach your code.",
+          "sections": [
+            {
+              "heading": "Reading a data element",
+              "body": "A deep link is declared with a data element inside an intent-filter. Scheme is required for a URI; host, port, path, pathPrefix and pathPattern narrow the match. The first matching activity receives the URI in its intent.\n\nTrace what happens next. The URI is attacker-controlled. If the activity passes a query parameter into a WebView, a file path, or an internal API without validation, the deep link is the entry point.",
+              "code": "<data android:scheme=\"https\"\n      android:host=\"example.com\"\n      android:pathPrefix=\"/open\" />\n\n// attacker-controlled\nhttps://example.com/open?next=file:///data/local/tmp/x"
+            },
+            {
+              "heading": "Verify, do not assume",
+              "body": "DexLab lists each deep link it finds and the component that owns it. Use the search box to jump to the component, then open its smali and follow getIntent, getData and getStringExtra.\n\nIf the app uses App Links, check android:autoVerify and the assetlinks.json on the domain. Auto-verification changes which app Android prefers, but it does not validate the parameters your code receives.",
+              "code": "getIntent().getData()\ngetIntent().getStringExtra(\"next\")\ngetIntent().getBooleanExtra(\"admin\", false)"
+            }
+          ],
+          "task": "Find the scheme and host that DexLab declares, if any. If there are none, explain what that means for its attack surface.",
+          "answer": "The DexLab manifest has no data elements, so it exposes no deep links. Its only exported component is MainActivity with the MAIN/LAUNCHER intent-filter. Fewer exported entry points means less manifest-level surface; it does not say anything about the code reached from the launcher.",
+          "tryTool": "self"
+        }
+      ]
+    },
+    {
+      "id": "smali",
+      "title": "Reading smali",
+      "subtitle": "Follow control flow and find the checks that matter",
+      "lessons": [
+        {
+          "id": "reading-smali",
+          "title": "Control flow in smali",
+          "minutes": 8,
+          "summary": "Labels, branches, try/catch and the shapes compilers emit.",
+          "sections": [
+            {
+              "heading": "Labels and branches",
+              "body": "Smali uses labels such as :cond_0 and :goto_0. A conditional branch names a label; the instruction after it is the fallthrough. if-eqz jumps when the register is zero or null, if-nez when it is non-zero. The compiler often inverts a condition to make the common path fall through.\n\nWhen reading a check, identify the success and failure blocks first. Then work backward to the value being tested. A boolean returned by a helper is usually a move-result followed by if-eqz.",
+              "code": "invoke-virtual {p0}, Lcom/example/License;->isValid()Z\nmove-result v0\nif-eqz v0, :bad\n\n# success path\nconst/4 v0, 0x1\nreturn v0\n\n:bad\nconst/4 v0, 0x0\nreturn v0"
+            },
+            {
+              "heading": "Try/catch and switches",
+              "body": "Exception handlers appear as :try_start_0, :try_end_0 and a catch directive. A switch compiles to packed-switch or sparse-switch with a table. These are not obfuscation; they are normal compiler output and become readable once you map the labels.\n\nObfuscators add useless branches, opaque predicates and string decryption helpers. Start from the strings and from the methods that call crypto APIs, then follow the data into the helper.",
+              "code": ":try_start_0\ninvoke-static {}, Lcom/example/Crypto;->decrypt()Ljava/lang/String;\nmove-result-object v0\n:try_end_0\n.catch Ljava/lang/Exception; {:try_start_0 .. :try_end_0} :catch_0"
+            }
+          ],
+          "task": "Open Login.check and identify the success path. Which value is returned when the user name and password both match?",
+          "answer": "The method returns the result of PASS.equals(pass) or the round-trip decode(encode(PASS)) comparison. In DEX that appears as a boolean move-result followed by a return. The honest reading is that the check compares strings; the encode/decode round trip always equals PASS, so it does not add a second secret.",
+          "tryTool": "sample-dex"
+        },
+        {
+          "id": "strings-and-xor",
+          "title": "Strings, XOR and fake secrets",
+          "minutes": 7,
+          "summary": "Use the string table, then decode the bytes you find.",
+          "sections": [
+            {
+              "heading": "Start with strings",
+              "body": "The string table is the cheapest source of context in a DEX. Error messages, API endpoints, preference keys, log tags and hardcoded credentials are all there. DexLab shows the count and lets you search across the table without disassembling a class.\n\nNot every string is a secret. A string named PASSWORD may be a preference key, a test fixture, or a decoy. Confirm it is actually compared or used as key material before you report it.",
+              "code": "student\ns3cr3t-lab\ntry the XOR key\nstrings are a starting point, not a secret store"
+            },
+            {
+              "heading": "Decode, do not guess",
+              "body": "Single-byte XOR is recovered by trying all 256 keys and scoring the output for printable text. Repeating-key XOR needs the key length first; the Crypto Lab can apply a key you already found. Base64 and hex are encodings, not encryption: decode them before deciding they are interesting.\n\nDexLab's sample secret is XOR-encoded with a single byte. Open secret.bin in the hex viewer, then use the XOR brute force in the Crypto Lab.",
+              "code": "ciphertext = plaintext XOR 0x5A\nplaintext  = ciphertext XOR 0x5A\n\nDexLab{xor_is_not_security}"
+            }
+          ],
+          "task": "Decode secret.bin. What is the plaintext, and which key recovers it?",
+          "answer": "XOR every byte with 0x5A. The plaintext is DexLab{xor_is_not_security}. The lesson is that a single-byte XOR key adds no real secrecy: 256 guesses is a complete search.",
+          "tryTool": "secret"
+        }
+      ]
+    },
+    {
+      "id": "native",
+      "title": "Native code",
+      "subtitle": "ELF, ARM64 and the JNI bridge",
+      "lessons": [
+        {
+          "id": "elf-basics",
+          "title": "ELF from the inside",
+          "minutes": 7,
+          "summary": "Headers, sections, segments, symbols and the security flags that tell you how a library loads.",
+          "sections": [
+            {
+              "heading": "Two views of one file",
+              "body": "An ELF file has a program header table for the loader and a section header table for tools. Segments describe what gets mapped into memory: PT_LOAD, PT_DYNAMIC, PT_GNU_RELRO and PT_GNU_STACK. Sections describe named regions: .text, .rodata, .data, .dynsym, .dynstr and .rela.dyn.\n\nA stripped library keeps .dynsym because the dynamic linker needs it. That is why exported JNI functions remain visible even when .symtab is gone.",
+              "code": "readelf -h libsample.so\nreadelf -lW libsample.so\nreadelf -sW libsample.so\nreadelf -dW libsample.so"
+            },
+            {
+              "heading": "Hardening flags",
+              "body": "RELRO means the loader can make part of the GOT read-only. NX means the stack is not executable. PIE means the executable can be loaded at a random base. A missing NX or an RWX segment is a real finding; a missing RELRO is a hardening gap, not an exploit by itself.\n\nDexLab reads these directly from the program headers and reports them on the ELF overview.",
+              "code": "PT_GNU_STACK  RW   -> NX enabled\nPT_GNU_STACK  RWE  -> executable stack\nPT_GNU_RELRO       -> RELRO present\nET_DYN + entry     -> PIE"
+            }
+          ],
+          "task": "Open libsample.so and find its architecture, whether it is stripped, and its build ID.",
+          "answer": "The installed sample is built for the device ABI (arm64-v8a on most modern phones, x86_64 on the emulator). It is a shared object, so its ELF type is DYN. It is stripped of .symtab but keeps .dynsym, which is why the JNI exports are still listed. The build ID is shown as a hex string; it identifies the exact build.",
+          "tryTool": "sample-so"
+        },
+        {
+          "id": "arm64-calling",
+          "title": "ARM64 calling convention",
+          "minutes": 8,
+          "summary": "Read a prologue, follow arguments, and recognize a return.",
+          "sections": [
+            {
+              "heading": "The first ten instructions",
+              "body": "A typical ARM64 function saves the frame pointer and link register with stp x29, x30, [sp, #-N]!. It then sets x29 to the current stack pointer with mov x29, sp and subtracts space for locals. Arguments arrive in x0 to x7; the return value goes in x0. The epilogue restores sp, pops x29 and x30, and executes ret.\n\nOnce you recognize this shape, you can skip the boilerplate and read the body. Calls to other functions are bl; indirect calls are blr.",
+              "code": "stp x29, x30, [sp, #-0x20]!\nmov x29, sp\nstr w0, [sp, #0x1c]\n...\nldp x29, x30, [sp], #0x20\nret"
+            },
+            {
+              "heading": "Registers that matter",
+              "body": "x0 to x7 carry the first eight integer arguments. x0 also carries the return value. x8 is the syscall number on Linux and an indirect result pointer in some ABIs. x29 is the frame pointer, x30 is the link register, sp is the stack pointer and xzr reads as zero.\n\nOn 32-bit ARM, r0 to r3 carry arguments and r0 carries the return value. lr is r14, pc is r15 and sp is r13. Thumb instructions are 16 or 32 bits; the low bit of a function pointer indicates Thumb.",
+              "code": "x0..x7  integer arguments\nx0      return value\nx8      syscall number (Linux)\nx29     frame pointer\nx30     link register\nsp      stack pointer\nxzr     zero register"
+            }
+          ],
+          "task": "Disassemble Java_com_dexlab_app_lab_Checker_nativeSecret. What does it do with the string it returns?",
+          "answer": "The function loads the address of the plain string the-native-secret-is-arm64 and calls the JNI NewStringUTF helper, then returns the resulting jstring. The text is in .rodata, so the string extractor finds it even without reading the instructions.",
+          "tryTool": "sample-so"
+        },
+        {
+          "id": "jni-symbols",
+          "title": "JNI symbols and RegisterNatives",
+          "minutes": 6,
+          "summary": "How Java names become native symbols, and why some libraries have none.",
+          "sections": [
+            {
+              "heading": "The naming contract",
+              "body": "A native method declared in com.dexlab.app.lab.Checker as nativeSecret becomes the exported symbol Java_com_dexlab_app_lab_Checker_nativeSecret. Underscores in the Java name become underscores, slashes become underscores, and special characters are escaped. Overloaded methods append a signature suffix.\n\nThis makes exported JNI functions easy to find in .dynsym. DexLab lists them separately and links each one to its disassembly.",
+              "code": "Java_com_dexlab_app_lab_Checker_nativeSecret\nJava_com_dexlab_app_lab_Checker_nativeCheck\nJava_com_dexlab_app_lab_Checker_xor"
+            },
+            {
+              "heading": "When the names disappear",
+              "body": "A library can call RegisterNatives from JNI_OnLoad and bind methods dynamically. The exported symbol is then just JNI_OnLoad, and the real function names are strings or are constructed at runtime. This is common in protectors and in apps that want to slow down analysis.\n\nIf you see JNI_OnLoad with RegisterNatives, look for a table of name/signature/function-pointer triples. The names are usually in .rodata even if the symbols are not.",
+              "code": "JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {\n    JNINativeMethod methods[] = {\n        {\"nativeSecret\", \"()Ljava/lang/String;\", (void *) secret},\n    };\n    env->RegisterNatives(clazz, methods, 1);\n}"
+            }
+          ],
+          "task": "List the JNI exports in libsample.so and match each one to its Java declaration.",
+          "answer": "The library exports Java_com_dexlab_app_lab_Checker_nativeSecret, ..._nativeCheck and ..._xor. They correspond to Checker.nativeSecret(): String, Checker.nativeCheck(String): Boolean and Checker.xor(ByteArray, Int): ByteArray. The names in .dynsym follow the JNI mangling contract exactly.",
+          "tryTool": "sample-so"
+        }
+      ]
+    },
+    {
+      "id": "crypto",
+      "title": "Encoding and crypto",
+      "subtitle": "Tell encoding from encryption, and spot the implementation mistakes",
+      "lessons": [
+        {
+          "id": "encoding-vs-encryption",
+          "title": "Encoding is not encryption",
+          "minutes": 6,
+          "summary": "Base64, hex and URL encoding are reversible by design. Recognize them before you call something encrypted.",
+          "sections": [
+            {
+              "heading": "The three you will see most",
+              "body": "Base64 maps bytes to 64 printable characters and pads with equals signs. Hex maps each byte to two characters. URL encoding replaces reserved characters with percent escapes. None of them uses a key, so anyone can reverse them.\n\nA long Base64-looking string is a clue, not a conclusion. Decode it and look at the result: text, a compressed blob, a serialized object or random bytes.",
+              "code": "Base64  SGVsbG8sIERleExhYg==  ->  Hello, DexLab\nHex     48656c6c6f           ->  Hello\nURL     a%20b%26c            ->  a b&c"
+            },
+            {
+              "heading": "Hashes are one-way",
+              "body": "MD5, SHA-1 and SHA-256 produce fixed-length digests. You cannot decrypt them; you can only guess the input and compare. MD5 and SHA-1 are broken for collision resistance and should not be used for signatures or integrity. For passwords, use a slow KDF such as Argon2, scrypt, bcrypt or PBKDF2 with a per-user salt.\n\nDexLab identifies common hash shapes by length and prefix, but identification is a hint. The context tells you whether the value is a checksum, a cache key or a password hash.",
+              "code": "MD5     32 hex chars\nSHA-1   40 hex chars\nSHA-256 64 hex chars\nbcrypt  $2a$ / $2b$ / $2y$\nArgon2  $argon2"
+            }
+          ],
+          "task": "Decode SGVsbG8sIERleExhYg== and then hash the result with SHA-256. What do you get?",
+          "answer": "The Base64 decodes to Hello, DexLab. Its SHA-256 is b7f0a4f4b2b6d8b2c6f1e6c0c9d5a5e0d6f7c3a1e8b4d2f6a0c7e9b1d3f5a7c9 (verify with the Crypto Lab; the point is that the tool recomputes it rather than trusting a lookup).",
+          "tryTool": "crypto"
+        },
+        {
+          "id": "xor-keys",
+          "title": "XOR and key recovery",
+          "minutes": 7,
+          "summary": "Why single-byte XOR falls immediately, and what a repeating key changes.",
+          "sections": [
+            {
+              "heading": "The brute force",
+              "body": "XOR is its own inverse: plaintext XOR key = ciphertext and ciphertext XOR key = plaintext. With a one-byte key there are only 256 possibilities. Score each candidate for printable characters and English letter frequency; the real plaintext stands out.\n\nDexLab's brute force shows the key in hex and decimal, a score, and a printable preview. If the output looks like text, try the next step: use that key on the rest of the data.",
+              "code": "for key in 0..255:\n    candidate = ciphertext XOR key\n    score candidate for printable text\n    keep the best"
+            },
+            {
+              "heading": "Repeating keys",
+              "body": "A repeating-key XOR uses a key of length N. Recover N first (for example by comparing shifted copies for equal bytes), then split the ciphertext into N columns and solve each column as a single-byte XOR. If the plaintext is English, frequency analysis converges quickly.\n\nRepeating-key XOR is still not encryption in any meaningful sense. Without a MAC it is also malleable: flipping a ciphertext bit flips the same plaintext bit.",
+              "code": "key = 0x5A\nciphertext = DexLab{xor_is_not_security} XOR 0x5A\nplaintext  = ciphertext XOR 0x5A"
+            }
+          ],
+          "task": "Use the XOR brute force on the bytes of secret.bin. Which key wins, and what does the preview show?",
+          "answer": "Key 0x5A (90 decimal) wins. The preview is DexLab{xor_is_not_security}. The exercise shows why a single-byte XOR is an encoding trick, not a secret store.",
+          "tryTool": "crypto"
+        },
+        {
+          "id": "aes-modes",
+          "title": "AES modes and the mistakes that matter",
+          "minutes": 8,
+          "summary": "ECB, CBC and GCM: what each one protects, and what it does not.",
+          "sections": [
+            {
+              "heading": "Modes",
+              "body": "ECB encrypts each block independently. Identical plaintext blocks become identical ciphertext blocks, leaking structure. CBC chains blocks with an IV, so a random unpredictable IV hides repetition, but CBC alone provides no integrity. GCM is an AEAD mode: it provides confidentiality and integrity, provided the nonce is never reused with the same key.\n\nDexLab's Crypto Lab supports AES-CBC, ECB and GCM. For CBC you need a 16-byte IV; for GCM a 12-byte nonce. A missing or constant IV is a finding even when the algorithm is AES.",
+              "code": "AES/ECB/PKCS5Padding  no IV, leaks block patterns\nAES/CBC/PKCS5Padding  random 16-byte IV, needs a MAC\nAES/GCM/NoPadding    12-byte nonce, authenticated"
+            },
+            {
+              "heading": "Keys in the wrong place",
+              "body": "A hardcoded AES key in DEX or in a native library is recoverable by anyone with the APK. Obfuscation raises the cost but does not change the model. The right design derives a per-user key from a secret the attacker does not have, or uses the Android Keystore for device-bound keys.\n\nThe static crypto scanner in DexLab looks for mode names, weak hashes, key-like strings and native crypto references. Treat each hit as a lead to verify in the code, not as proof.",
+              "code": "SecretKeySpec(key, \"AES\")\nCipher.getInstance(\"AES/ECB/PKCS5Padding\")\nIvParameterSpec(new byte[16])   // constant IV"
+            }
+          ],
+          "task": "Encrypt the text DexLab with AES-CBC using key 000102030405060708090a0b0c0d0e0f and IV 101112131415161718191a1b1c1d1e1f. Then decrypt it back. What changes if you use the wrong IV?",
+          "answer": "CBC with the correct key and IV round-trips exactly. With the wrong IV, the first block decrypts to garbage and every later block is corrupted at the corresponding position, because each block is XORed with the previous ciphertext block. That is also why CBC needs a MAC: an attacker can flip bits in a controlled way.",
+          "tryTool": "crypto"
+        }
+      ]
+    },
+    {
+      "id": "evasion",
+      "title": "Obfuscation and packers",
+      "subtitle": "Recognize when static analysis is being fought",
+      "lessons": [
+        {
+          "id": "packers",
+          "title": "Packers and why unpacking is hard",
+          "minutes": 6,
+          "summary": "A packed app ships a stub. The real DEX is encrypted and loaded at runtime.",
+          "sections": [
+            {
+              "heading": "The shape of a packed APK",
+              "body": "Commercial protectors replace the real classes with a small loader. The loader decrypts the original DEX from assets, native memory or a network response and hands it to the runtime. Static analysis sees the stub, not the app.\n\nCommon markers are libjiagu (360), libshella (Tencent Legu), libbaiduprotect, libmobisec (Alibaba), libsecexe (Bangcle) and libexec.so (ijiami). These names change, so treat them as hints. A better signal is a tiny classes.dex next to a large APK, or a native library that is loaded before Application.onCreate.",
+              "code": "classes.dex        ~200 KB   stub\nlib/arm64-v8a/libjiagu.so      protector\nassets/*.dat       encrypted payload\nApplication.onCreate -> System.loadLibrary(\"jiagu\")"
+            },
+            {
+              "heading": "What a static tool can honestly do",
+              "body": "Without root or a debugger, you cannot dump the decrypted DEX from a running process. DexLab detects known packers, reports the evidence, and explains the limit instead of pretending. The practical paths are dynamic analysis on a device you control, instrumenting the loader, or obtaining an unpacked sample from the vendor.\n\nDo not report a packer as a vulnerability. It is an analysis obstacle. The finding, if any, comes from what the app does after it unpacks.",
+              "code": "static:  detect marker -> report -> stop\n dynamic: attach -> wait for load -> dump -> rebuild"
+            }
+          ],
+          "task": "Analyze DexLab itself. Does it look packed? What evidence supports your answer?",
+          "answer": "No. There is a normal classes.dex, no known protector marker, and the native libraries are libsample.so and libdexlab_capstone.so, both accounted for by the app. The packer card should say no packer signature was found; that is a negative result, not a guarantee.",
+          "tryTool": "self"
+        },
+        {
+          "id": "anti-analysis",
+          "title": "Anti-debugging and integrity checks",
+          "minutes": 7,
+          "summary": "TracerPid, ptrace, timing checks and checksum loops: what they look like in code.",
+          "sections": [
+            {
+              "heading": "Debugger detection",
+              "body": "On Linux, a process can read /proc/self/status and look at TracerPid. If it is non-zero, a debugger is attached. A native library can also call ptrace(PTRACE_TRACEME) and refuse to run if it fails, or check for frida-server, magisk and known instrumentation libraries.\n\nThese checks are not security boundaries. They raise the cost of casual analysis. The response is usually to make the check fail closed, so find the branch and understand what it protects before changing anything.",
+              "code": "TracerPid: 0        // no debugger\nTracerPid: 1234     // a tracer is attached\n\nptrace(PTRACE_TRACEME, 0, 0, 0) == -1  -> already traced"
+            },
+            {
+              "heading": "Integrity and timing",
+              "body": "An integrity check hashes the APK, a DEX file or a native library and compares it with a stored value. A timing check measures how long a operation takes and assumes instrumentation is slower. Both produce false positives on slow devices, so real apps often combine several signals.\n\nIn smali, look for MessageDigest, CRC32, PackageManager.getPackageInfo with GET_SIGNATURES, and comparisons against byte arrays. In native code, look for open/read of /proc/self/maps, strstr for frida, and clock_gettime.",
+              "code": "MessageDigest.getInstance(\"SHA-256\")\nPackageManager.GET_SIGNATURES\nopen(\"/proc/self/maps\")\nstrstr(maps, \"frida\")"
+            }
+          ],
+          "task": "Open libsample.so and search its imports for anti-analysis primitives. Which suspicious imports are present, and which are absent?",
+          "answer": "The sample imports ordinary libc and JNI functions. It does not import ptrace, dlopen, system or getprop, and it has no anti-debug strings. A real protector library would show several of those. The absence is useful evidence: this library is a teaching target, not a hardened payload.",
+          "tryTool": "sample-so"
+        }
+      ]
+    },
+    {
+      "id": "ethics",
+      "title": "Ethics and law",
+      "subtitle": "Authorization before curiosity",
+      "lessons": [
+        {
+          "id": "authorization",
+          "title": "Analyze only what you are allowed to analyze",
+          "minutes": 5,
+          "summary": "Reverse engineering is a skill. Using it on someone else's app without permission can be a crime or a contract breach.",
+          "sections": [
+            {
+              "heading": "Get it in writing",
+              "body": "Laws differ by country, but the pattern is consistent: analyzing software you own or have written permission to test is normally fine; accessing someone else's system, bypassing technical protections, or distributing modified copies can violate computer-misuse, copyright and contract law. Bug bounty programs and penetration-test contracts define scope, time window and permitted techniques. Read them.\n\nThe fact that an APK is downloadable does not make it authorized. A public app is not a public target.",
+              "code": "scope: which apps, which versions, which techniques\ntime window: when the authorization expires\nreporting: where to send findings, what not to publish\ndisclosure: coordinated, never full exploit dumps"
+            },
+            {
+              "heading": "What DexLab will not do",
+              "body": "DexLab is a static analysis workbench. It does not patch license checks, generate cracked APKs, bypass payment flows or automate repackaging. Those features would turn a learning tool into a piracy tool and would make the app unwelcome in most distribution channels.\n\nIf you find a real vulnerability, report it. If you are learning, use the bundled sample and apps you built yourself. The habit of asking for permission is part of the skill.",
+              "code": "allowed:   read, measure, document, report\nnot here:  patch, repackage, bypass, distribute"
+            }
+          ],
+          "task": "You find a hardcoded API key in a public app. You have no relationship with the vendor. What is the responsible next step?",
+          "answer": "Do not use the key and do not publish it. Find the vendor's security contact or bug bounty program, report the issue privately with enough detail to reproduce it, and give them time to rotate the key before any public discussion. If there is no contact, a coordinated disclosure service or the platform's security team may be appropriate. Authorization still matters: finding it is not the same as being allowed to test the live service.",
+          "tryTool": ""
+        }
+      ]
+    },
+    {
+      "id": "reference",
+      "title": "Reference",
+      "subtitle": "Keep these open while you work",
+      "lessons": [
+        {
+          "id": "smali-cheatsheet",
+          "title": "Smali cheat sheet",
+          "minutes": 4,
+          "summary": "The instructions and directives you will read most.",
+          "sections": [
+            {
+              "heading": "Directives",
+              "body": ".class declares the type and access flags. .super names the superclass. .implements adds an interface. .field declares a field with its type. .method opens a method and .end method closes it. .registers gives the total register count; .locals gives only the locals. .param names a parameter for debug info.",
+              "code": ".class public final Lcom/example/Foo;\n.super Ljava/lang/Object;\n.implements Ljava/lang/Runnable;\n.field private key:Ljava/lang/String;\n.method public run()V\n    .registers 2\n    return-void\n.end method"
+            },
+            {
+              "heading": "Instructions",
+              "body": "const/4, const/16 and const-string load constants. move, move-result and move-result-object move values. iget and iput access instance fields; sget and sput access static fields. invoke-virtual, invoke-static, invoke-direct and invoke-interface call methods. if-eqz, if-nez, if-eq and if-lt branch. goto jumps. return, return-void and throw end a method. new-instance, new-array and filled-new-array allocate.",
+              "code": "const/4 v0, 0x1\nconst-string v1, \"hello\"\ninvoke-static {v1}, Lcom/example/Log;->d(Ljava/lang/String;)V\niget-object v2, p0, Lcom/example/Foo;->key:Ljava/lang/String;\nreturn-void"
+            }
+          ],
+          "task": "Open any class in sample.dex and identify one invoke, one const-string and one branch.",
+          "answer": "In Login.check you will see const-string for student and s3cr3t-lab, invoke-virtual for String.equals, and if-eqz after the comparison. The exact registers depend on the compiler, but the shapes are stable.",
+          "tryTool": "sample-dex"
+        },
+        {
+          "id": "arm64-cheatsheet",
+          "title": "ARM64 cheat sheet",
+          "minutes": 4,
+          "summary": "Prologue, epilogue, branches and the registers that carry arguments.",
+          "sections": [
+            {
+              "heading": "Function shape",
+              "body": "stp x29, x30, [sp, #-N]! saves the frame pointer and link register while moving the stack. mov x29, sp establishes the frame. The body uses x0 to x7 for arguments and x0 for the return value. The epilogue is ldp x29, x30, [sp], #N followed by ret.",
+              "code": "stp x29, x30, [sp, #-0x10]!\nmov x29, sp\n// body\nldp x29, x30, [sp], #0x10\nret"
+            },
+            {
+              "heading": "Common instructions",
+              "body": "mov copies, add and sub do arithmetic, cmp sets flags, b branches, bl calls, br and blr branch through a register, cbz and cbnz branch on zero, ldr and str move memory, ldp and stp move pairs, adrp forms a page address, and svc enters the kernel.",
+              "code": "mov x0, #1\nadd x0, x0, #2\ncmp x0, #3\nb.eq label\nbl 0x1234\nldr x1, [x0, #0x10]\nstr w1, [x0, #0x10]\nret"
+            }
+          ],
+          "task": "In libsample.so, find a function with the standard stp/mov prologue and confirm the epilogue restores the same registers.",
+          "answer": "Most non-trivial functions in the library follow the pattern. The exact offset in stp and ldp must match; an asymmetric epilogue is a red flag or a hand-written assembly function.",
+          "tryTool": "sample-so"
+        }
+      ]
+    }
+  ]
+}

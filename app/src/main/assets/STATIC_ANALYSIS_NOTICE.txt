@@ -1,0 +1,10 @@
+Hi, static analyst.
+
+You are reading the DexLab APK. That is fair: DexLab exists to teach Android reverse engineering.
+
+A small request:
+- Analyze only apps you own or have explicit permission to test.
+- Report bugs instead of republishing modified builds.
+- If you are learning, open the Learn tab and start with assets/lab/sample.dex. It is a better target than this app.
+
+Built with DexLab.
