@@ -1,5 +1,6 @@
 package com.dexlab.app.ui.screens
 
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -69,6 +70,7 @@ fun FilesScreen(nav: NavHostController, projectId: String) {
     var query by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf<ApkArchive.Entry?>(null) }
     var pendingExport by remember { mutableStateOf<ApkArchive.Entry?>(null) }
+    var pendingAbi by remember { mutableStateOf<ApkArchive.AbiGroup?>(null) }
 
     LaunchedEffect(projectId) {
         loading = true
@@ -91,8 +93,33 @@ fun FilesScreen(nav: NavHostController, projectId: String) {
         }
     }
 
+    val abiExportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        val abi = pendingAbi
+        pendingAbi = null
+        val archive = session?.archive
+        if (uri != null && abi != null && archive != null) {
+            scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val out = context.contentResolver.openOutputStream(uri)
+                            ?: error("Cannot open the selected destination")
+                        out.use { archive.writeAbiZip(abi.abi, it, session?.project?.name) }
+                    }
+                }
+                Toast.makeText(
+                    context,
+                    result.fold(
+                        onSuccess = { "Exported $it native files + manifest from lib/${abi.abi}" },
+                        onFailure = { "ABI export failed: ${it.message}" }
+                    ),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
     LabScaffold(
-        title = "Files and entries",
+        title = "Files, ABIs and entries",
         subtitle = session?.project?.name ?: "archive contents",
         onBack = { nav.popBackStack() }
     ) { padding ->
@@ -117,6 +144,7 @@ fun FilesScreen(nav: NavHostController, projectId: String) {
                 )
             )
         }
+        val abiGroups = remember(s) { s?.archive?.abiGroups.orEmpty() }
 
         when {
             loading -> LoadingPane("Listing entries…")
@@ -135,6 +163,14 @@ fun FilesScreen(nav: NavHostController, projectId: String) {
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                if (abiGroups.isNotEmpty()) {
+                    item {
+                        NativeAbiCard(abiGroups) { abi ->
+                            pendingAbi = abi
+                            abiExportLauncher.launch(abiExportName(session?.project?.name, abi.abi))
+                        }
+                    }
                 }
                 items(entries.take(1500), key = { it.name + it.container.name }) { entry ->
                     EntryRow(entry) { selected = entry }
@@ -206,6 +242,75 @@ fun FilesScreen(nav: NavHostController, projectId: String) {
             confirmButton = {}
         )
     }
+}
+
+@Composable
+private fun NativeAbiCard(
+    groups: List<ApkArchive.AbiGroup>,
+    onExport: (ApkArchive.AbiGroup) -> Unit
+) {
+    SectionCard(
+        title = "Native ABIs",
+        subtitle = "Extract one architecture as a ZIP"
+    ) {
+        Text(
+            "These are the lib/<abi>/ folders shipped inside the APK. Export keeps that directory layout, so arm64, arm32 and x86 variants stay separate.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            "The ZIP includes ABI-MANIFEST.txt with each library's architecture, size, SHA-256 and ELF build ID (when present).",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextDim
+        )
+        ThinDivider()
+        groups.forEach { group ->
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        group.abi,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = CodeFont),
+                        color = Blue,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "${abiDescription(group.abi)} · ${group.soCount} .so · ${Fmt.bytes(group.bytes)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                TextButton(onClick = { onExport(group) }) { Text("Export ZIP") }
+            }
+        }
+        Text(
+            "Each .so can also be exported individually below. Search for lib/ plus an ABI name to narrow the entries to one variant.",
+            style = MaterialTheme.typography.labelSmall,
+            color = TextDim
+        )
+    }
+}
+
+private fun abiDescription(abi: String): String = when (abi) {
+    "arm64-v8a" -> "64-bit ARM"
+    "armeabi-v7a" -> "32-bit ARM"
+    "armeabi" -> "legacy ARM"
+    "x86_64" -> "64-bit x86"
+    "x86" -> "32-bit x86"
+    "riscv64" -> "64-bit RISC-V"
+    else -> "native"
+}
+
+private fun abiExportName(projectName: String?, abi: String): String {
+    val base = projectName.orEmpty().substringBeforeLast('.').trim()
+        .replace(Regex("""[\\/:*?"<>|]"""), "_")
+        .ifBlank { "apk" }
+        .take(64)
+    val safeAbi = abi.replace(Regex("""[\\/:*?"<>|]"""), "_")
+    return "$base-$safeAbi.zip"
 }
 
 @Composable

@@ -548,6 +548,7 @@ private fun buildDeepReport(session: ProjectSession, context: android.content.Co
         "Size" to Fmt.bytes(project.sizeBytes),
         "DEX files" to archive.dexNames.size.toString(),
         "Native libs" to nativeLibs.size.toString(),
+        "Native ABIs" to nativeLibs.map { it.abi }.filter { it.isNotBlank() }.distinct().joinToString(", ").ifBlank { "none" },
         "Assets" to archive.assetCount.toString(),
         "Permissions" to (manifest?.permissions?.size ?: 0).toString(),
         "Exported components" to (manifest?.exportedCount ?: 0).toString(),

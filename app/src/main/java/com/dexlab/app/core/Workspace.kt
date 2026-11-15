@@ -38,11 +38,17 @@ class Workspace(private val context: Context) {
         val resolver = context.contentResolver
         val dir = newDir()
         val input = File(dir, "input").apply { mkdirs() }
-        val files = uris.mapIndexed { index, uri -> copyUri(resolver, uri, input, index) }
+        val copied = uris.mapIndexed { index, uri -> copyUri(resolver, uri, input, index) }
+        val sourceName = copied.firstOrNull()?.name ?: "Imported file"
+        val files = if (copied.size == 1) {
+            BundleSplitter.extract(copied.first()) ?: copied
+        } else {
+            copied
+        }
         val kind = detectKind(files)
         val project = Project(
             id = dir.name,
-            name = files.firstOrNull()?.name ?: "Imported file",
+            name = if (files !== copied) sourceName else files.firstOrNull()?.name ?: sourceName,
             kind = kind,
             files = files.map { it.absolutePath },
             sizeBytes = files.sumOf { it.length() },

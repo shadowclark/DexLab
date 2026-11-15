@@ -258,7 +258,7 @@ fun AnalyzeScreen(nav: NavHostController) {
             item {
                 SectionCard(
                     title = "Open a target",
-                    subtitle = "APK, DEX, native library, archive or any file"
+                    subtitle = "APK, APKM/APKS bundle, DEX, native library or any file"
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
@@ -311,7 +311,7 @@ fun AnalyzeScreen(nav: NavHostController) {
                 item {
                     EmptyState(
                         "No projects yet",
-                        "Open an APK or analyze DexLab itself. The sample DEX and native library are built in."
+                        "Open an APK or APKM/APKS bundle, or analyze DexLab itself. The sample DEX and native library are built in."
                     )
                 }
             } else {

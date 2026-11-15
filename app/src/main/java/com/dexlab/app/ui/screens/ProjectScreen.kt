@@ -246,7 +246,14 @@ fun ProjectScreen(nav: NavHostController, projectId: String) {
                             SectionCard(title = "Signing certificate", subtitle = "The identity Android checks at install time") {
                                 KeyValue("SHA-256", s.summary.signatureSha256 ?: "no certificate found", mono = true, valueColor = if (s.summary.signatureSha256 != null) Green else Red)
                                 KeyValue("Subject", s.summary.signatureSubject ?: "unknown")
-                                KeyValue("Splits", if (s.summary.splitNames.isEmpty()) "none (single APK)" else s.summary.splitNames.joinToString(", "))
+                                KeyValue(
+                                    "Splits",
+                                    when {
+                                        s.summary.splitNames.isNotEmpty() -> s.summary.splitNames.joinToString(", ")
+                                        s.project.files.size > 1 -> "${s.project.files.size} APK files (bundle)"
+                                        else -> "none (single APK)"
+                                    }
+                                )
                                 KeyValue("Debuggable", if (s.summary.debuggable) "true" else "false", valueColor = if (s.summary.debuggable) Red else Green)
                             }
                         }
@@ -336,7 +343,11 @@ fun ProjectScreen(nav: NavHostController, projectId: String) {
                             val original = project.mainFile?.let(::File)
                             if (original != null && original.isFile) {
                                 BenchOutlinedButton(
-                                    text = "Export original ${original.name.substringAfterLast('.', "file").uppercase()}",
+                                    text = if (project.files.size > 1) {
+                                        "Export base APK"
+                                    } else {
+                                        "Export original ${original.name.substringAfterLast('.', "file").uppercase()}"
+                                    },
                                     onClick = {
                                         pendingExport = original.name to original
                                         exportLauncher.launch(original.name)
@@ -385,7 +396,7 @@ fun ProjectScreen(nav: NavHostController, projectId: String) {
                             }
                             if (s.archive != null) {
                                 BenchOutlinedButton(
-                                    text = "Files and entries",
+                                    text = "Files, ABIs and export",
                                     onClick = { nav.navigate("files/${project.id}") },
                                     modifier = Modifier.fillMaxWidth()
                                 )

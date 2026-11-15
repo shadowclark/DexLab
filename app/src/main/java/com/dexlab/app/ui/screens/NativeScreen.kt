@@ -87,6 +87,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.security.MessageDigest
 
 data class LibEntry(
     val path: String,
@@ -102,9 +103,11 @@ fun NativeScreen(nav: NavHostController, projectId: String) {
     val scope = rememberCoroutineScope()
     var session by remember { mutableStateOf<ProjectSession?>(null) }
     var libs by remember { mutableStateOf<List<LibEntry>>(emptyList()) }
+    var abiFilter by remember { mutableStateOf<String?>(null) }
     var selectedLib by remember { mutableStateOf<LibEntry?>(null) }
     var elf by remember { mutableStateOf<ElfInfo?>(null) }
     var elfFile by remember { mutableStateOf<File?>(null) }
+    var libSha256 by remember { mutableStateOf<String?>(null) }
     var loadingLib by remember { mutableStateOf(false) }
     var libError by remember { mutableStateOf<String?>(null) }
     var functionQuery by remember { mutableStateOf("") }
@@ -161,6 +164,7 @@ fun NativeScreen(nav: NavHostController, projectId: String) {
     }
 
     LaunchedEffect(projectId) {
+        abiFilter = null
         val s = runCatching { SessionCache.get(context, projectId) }.getOrNull()
         session = s
         libs = when {
@@ -192,6 +196,7 @@ fun NativeScreen(nav: NavHostController, projectId: String) {
         scope.launch {
             loadingLib = true
             libError = null
+            libSha256 = null
             selectedFunction = null
             instructions = emptyList()
             try {
@@ -206,6 +211,9 @@ fun NativeScreen(nav: NavHostController, projectId: String) {
                     }
                 }
                 elfFile = file
+                libSha256 = withContext(Dispatchers.IO) {
+                    runCatching { sha256Hex(file) }.getOrNull()
+                }
                 val parsed = withContext(Dispatchers.IO) { ElfParser().parse(file) }
                 elf = parsed
                 thumb = parsed.arch == ElfArch.ARM
@@ -416,6 +424,7 @@ fun NativeScreen(nav: NavHostController, projectId: String) {
             selectedLib != null && elf != null -> LibDetail(
                 modifier = Modifier.fillMaxSize().padding(padding),
                 elf = elf!!,
+                sha256 = libSha256,
                 annotations = annotations,
                 functionQuery = functionQuery,
                 onFunctionQuery = { functionQuery = it },
@@ -425,6 +434,8 @@ fun NativeScreen(nav: NavHostController, projectId: String) {
             else -> LibList(
                 modifier = Modifier.fillMaxSize().padding(padding),
                 libs = libs,
+                selectedAbi = abiFilter,
+                onAbi = { abiFilter = it },
                 onOpen = { loadLib(it) }
             )
         }
@@ -503,7 +514,16 @@ fun NativeScreen(nav: NavHostController, projectId: String) {
 }
 
 @Composable
-private fun LibList(modifier: Modifier, libs: List<LibEntry>, onOpen: (LibEntry) -> Unit) {
+private fun LibList(
+    modifier: Modifier,
+    libs: List<LibEntry>,
+    selectedAbi: String?,
+    onAbi: (String?) -> Unit,
+    onOpen: (LibEntry) -> Unit
+) {
+    val counts = libs.groupingBy { it.abiKey() }.eachCount()
+    val abis = counts.keys.sortedWith(compareBy({ abiOrder(it) }, { it }))
+    val visible = if (selectedAbi == null) libs else libs.filter { it.abiKey() == selectedAbi }
     LazyColumn(
         modifier,
         contentPadding = PaddingValues(16.dp),
@@ -524,7 +544,34 @@ private fun LibList(modifier: Modifier, libs: List<LibEntry>, onOpen: (LibEntry)
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            items(libs) { lib ->
+            item {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FilterChip(
+                        selected = selectedAbi == null,
+                        onClick = { onAbi(null) },
+                        label = { Text("All ${libs.size}") }
+                    )
+                    abis.forEach { abi ->
+                        FilterChip(
+                            selected = selectedAbi == abi,
+                            onClick = { onAbi(abi) },
+                            label = { Text("$abi ${counts[abi]}") }
+                        )
+                    }
+                }
+            }
+            if (visible.isEmpty()) {
+                item {
+                    EmptyState(
+                        "No $selectedAbi libraries",
+                        "Choose All to see the libraries shipped for every ABI."
+                    )
+                }
+            }
+            items(visible) { lib ->
                 SectionCard(modifier = Modifier.clickable { onOpen(lib) }) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -535,7 +582,7 @@ private fun LibList(modifier: Modifier, libs: List<LibEntry>, onOpen: (LibEntry)
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                "${lib.abi.ifBlank { "standalone" }}  ·  ${Fmt.bytes(lib.size)}",
+                                "${lib.abiKey()}  ·  ${Fmt.bytes(lib.size)}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -548,10 +595,24 @@ private fun LibList(modifier: Modifier, libs: List<LibEntry>, onOpen: (LibEntry)
     }
 }
 
+private fun LibEntry.abiKey(): String = abi.ifBlank { "standalone" }
+
+private fun abiOrder(abi: String): Int = when (abi) {
+    "arm64-v8a" -> 0
+    "armeabi-v7a" -> 1
+    "x86_64" -> 2
+    "x86" -> 3
+    "armeabi" -> 4
+    "riscv64" -> 5
+    "standalone" -> 99
+    else -> 50
+}
+
 @Composable
 private fun LibDetail(
     modifier: Modifier,
     elf: ElfInfo,
+    sha256: String?,
     annotations: Map<Long, NativeAnnotation>,
     functionQuery: String,
     onFunctionQuery: (String) -> Unit,
@@ -581,6 +642,7 @@ private fun LibDetail(
                 KeyValue("RELRO", yesNo(elf.relro), valueColor = if (elf.relro) Green else Amber)
                 KeyValue("NX", yesNo(elf.nx), valueColor = if (elf.nx) Green else Red)
                 KeyValue("Build ID", elf.buildId ?: "not present", mono = true)
+                KeyValue("SHA-256", sha256 ?: "unavailable", mono = true)
                 KeyValue("SONAME", elf.soname ?: "not set", mono = true)
                 KeyValue("Needed", elf.needed.joinToString(", ").ifBlank { "none" })
                 ThinDivider()
@@ -921,6 +983,27 @@ private val Color4D = TextDim
 private fun hex(value: Long): String = value.toString(16).padStart(8, '0')
 
 private fun yesNo(value: Boolean): String = if (value) "yes" else "no"
+
+private fun sha256Hex(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buffer = ByteArray(1 shl 20)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return buildString(64) {
+        for (byte in digest.digest()) {
+            val value = byte.toInt() and 0xff
+            append(HEX[value ushr 4])
+            append(HEX[value and 0x0f])
+        }
+    }
+}
+
+private val HEX = "0123456789abcdef".toCharArray()
 
 private fun archHint(name: String): String = when {
     name.contains("arm64") -> "arm64-v8a"
